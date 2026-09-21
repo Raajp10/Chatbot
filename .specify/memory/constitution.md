@@ -1,5 +1,26 @@
 <!--
 Sync Impact Report
+- Version change: 1.0.1 → 2.0.0
+- Rationale (2.0.0, MAJOR): The course now explicitly requires Docker for
+  this project, reversing the prior explicit "no Docker" constraint in
+  Principle V (a NON-NEGOTIABLE principle). This is a redefinition of a
+  NON-NEGOTIABLE principle's actual requirement, not a wording clarification,
+  so it is versioned as MAJOR per the Governance section's own rule. The
+  system now MUST run via Docker Compose (a `backend` service and a
+  `frontend` service) as the standard environment; ChromaDB remains a single
+  embedded, file-based store (no separate Chroma server container), now
+  persisted via a Docker volume instead of a bare local directory. No other
+  principle changed; free-tier-only and single-embedded-vector-store remain
+  non-negotiable.
+- Modified principles: V. Local-First, Free-Tier Stack → Containerized,
+  Free-Tier Stack (Docker Compose is now required instead of prohibited)
+- Added sections: none
+- Removed sections: none
+- Deferred placeholders: none
+-->
+
+<!--
+Sync Impact Report (1.0.1, historical)
 - Version change: 1.0.0 → 1.0.1
 - Rationale (1.0.1, PATCH): /speckit-analyze on feature 001-pnw-student-chatbot
   flagged (finding C1) that Principle II's blanket "...or outdated... MUST
@@ -99,17 +120,24 @@ against a concrete, current need — never a hypothetical future one.
 complexity slows delivery and obscures whether the core grounding and fail-safe
 behavior actually works, which is the part that matters most.
 
-### V. Local-First, Free-Tier Stack (NON-NEGOTIABLE)
+### V. Containerized, Free-Tier Stack (NON-NEGOTIABLE)
 
-The system MUST run entirely on a local machine using native Python (`uv`) +
-FastAPI for the backend and Node/npm + React for the frontend, with no Docker or
-other containerization requirement. The system MUST use only free-tier APIs —
-Google Gemini for generation and embeddings — and MUST NOT depend on a paid LLM
-or embedding service.
+The system MUST run via Docker Compose as its standard environment: a `backend`
+service (FastAPI, dependencies managed with `uv` inside the image) and a
+`frontend` service (React/Vite, dependencies managed with `npm` inside the
+image), brought up together with `docker compose up --build`. The system MUST
+use only free-tier APIs — Google Gemini for generation and embeddings — and
+MUST NOT depend on a paid LLM or embedding service. ChromaDB MUST remain a
+single embedded, file-based store (no separate Chroma server process/container),
+with its data directory persisted via a Docker volume so ingested content
+survives container restarts.
 
 **Rationale**: These are explicit, non-negotiable course requirements for this
-project; it must be runnable and demonstrable by a student without paid
-infrastructure or container tooling.
+project. Docker Compose is now required (reversing the prior no-Docker
+constraint) so the two-service local architecture is reproducible across
+machines without a shared native Python/Node setup; free-tier-only and a single
+embedded vector store remain required for the same cost and simplicity reasons
+as before.
 
 ## Content & Context Integrity
 
@@ -147,4 +175,4 @@ section, before implementation proceeds. Reviews (including `/code-review`)
 should check compliance with Principles I–III in particular, since they encode
 this project's user-facing trust and safety guarantees.
 
-**Version**: 1.0.1 | **Ratified**: 2026-09-16 | **Last Amended**: 2026-09-19
+**Version**: 2.0.0 | **Ratified**: 2026-09-16 | **Last Amended**: 2026-09-21

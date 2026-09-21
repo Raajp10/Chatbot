@@ -2,40 +2,30 @@
 
 **Feature**: 001-pnw-student-chatbot | **Date**: 2026-09-19 (re-simplified)
 
-This guide validates the feature end-to-end once implemented, using the course-required local stack: FastAPI + React, no Docker, Google Gemini free-tier APIs, and a local ChromaDB store. It references `data-model.md` and `contracts/query-api.md` rather than duplicating them.
+This guide validates the feature end-to-end once implemented, using the course-required stack: FastAPI + React, run via Docker Compose, Google Gemini free-tier APIs, and a local ChromaDB store. It references `data-model.md` and `contracts/query-api.md` rather than duplicating them.
 
 ## Prerequisites
 
-- Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) installed
-- Node.js 20 LTS and `npm`
+- [Docker](https://docs.docker.com/get-docker/) and the Docker Compose plugin (`docker compose version`) installed and running — this is the only way this project is run
 - A Google Gemini API key (free tier — see course material for how to obtain one)
-- No database server and no Docker are required — ChromaDB persists to a local folder automatically
+- No separate database server is required — ChromaDB persists to a Docker-managed volume automatically
+- Python 3.11+/[`uv`](https://docs.astral.sh/uv/) and Node.js 20+/`npm` are only needed on the host if you want IDE tooling (linting, autocomplete) outside the containers — they are not required to build or run the app
 - A small, hand-curated approved-source manifest (`backend/app/ingestion/sources.json`) listing a handful of approved PNW pages/PDFs, each entry supplying `url` and `title` at minimum, covering: an add/drop deadline table, a course-with-prerequisites catalog entry, a parking-ticket policy page, one page that applies to only a single campus, a program-requirements page for at least two distinct programs, a plan-of-study page that differs for undergraduate vs. graduate students, and one page carrying an explicit prior-year date alongside a newer page covering the same topic. Any important child page or attached PDF must be its own explicit entry in the manifest (there is no crawler to discover it automatically — see `research.md` §6). Automated tests may use separate local fixtures that stand in for sources; the approved manifest itself always points at official/approved PNW content, never fabricated or placeholder pages.
 
 ## Setup
 
-### Backend
-
 ```bash
-cd backend
-uv sync                      # installs FastAPI, chromadb, google-genai, etc. from pyproject.toml
-cp .env.example .env         # set GEMINI_API_KEY
+cp backend/.env.example backend/.env   # set GEMINI_API_KEY
+docker compose build                   # builds the backend and frontend images
 ```
 
-### Frontend
-
-```bash
-cd frontend
-npm install
-```
-
-No migration step is needed — ChromaDB creates its local persistent store (`backend/data/chroma/`) automatically the first time it's used.
+No migration step is needed — ChromaDB creates its persistent store automatically the first time it's used, inside the `chroma_data` Docker volume mounted at `/app/data/chroma` in the `backend` container.
 
 ## Ingest the approved-source corpus
 
 ```bash
-cd backend
-uv run python -m app.ingestion.run --manifest app/ingestion/sources.json
+docker compose up -d backend
+docker compose exec backend uv run python -m app.ingestion.run --manifest app/ingestion/sources.json
 ```
 
 Expected outcome: for each manifest entry, its content is fetched/read, parsed, chunked, embedded, and written to the local Chroma store as one or more `SourceChunk` records, carrying `structureContext` and any `campus`/`academicTerm`/`courseName`/`programName`/`studentLevel` values the manifest supplied — fields the manifest didn't supply are simply omitted, never guessed. Re-running the same command is idempotent (re-ingesting a URL replaces its prior chunks rather than duplicating them).
@@ -43,14 +33,28 @@ Expected outcome: for each manifest entry, its content is fetched/read, parsed, 
 ## Run the app
 
 ```bash
-# terminal 1
-cd backend && uv run uvicorn app.main:app --reload --port 8000
-
-# terminal 2
-cd frontend && npm run dev
+docker compose up --build
 ```
 
-Open the standalone chat page (per FR-026, no embedding) at the address `npm run dev` prints (typically `http://localhost:5173`). Confirm the audience disclaimer (FR-024) is visible — it's static text rendered by `DisclaimerBanner.jsx`, not returned by the API.
+- Frontend: http://localhost:5173
+- Backend: http://localhost:8000
+- FastAPI docs: http://localhost:8000/docs
+
+Open the standalone chat page (per FR-026, no embedding) at `http://localhost:5173`. Confirm the audience disclaimer (FR-024) is visible — it's static text rendered by `DisclaimerBanner.jsx`, not returned by the API.
+
+To stop the app:
+
+```bash
+docker compose down
+```
+
+## Run backend tests
+
+Backend tests run inside the `backend` image — the same image `docker compose up` runs, not a separate test image or a host-side `pytest` install — since the image already includes `tests/` and the `dev` dependency group (`pytest`, `httpx`) from `uv sync` (see `backend/Dockerfile`, `backend/.dockerignore`):
+
+```bash
+docker compose run --rm backend uv run --no-sync pytest
+```
 
 ## Validation scenarios (map to spec Acceptance Scenarios)
 
@@ -119,5 +123,7 @@ No scripted evaluation runner exists for v1 (`research.md` §11) — run these q
 ## Cleanup
 
 ```bash
-rm -rf backend/data/chroma   # deletes the local vector store; re-run ingestion to rebuild it
+docker compose down -v   # stops containers and deletes the chroma_data volume; re-run ingestion to rebuild it
 ```
+
+Use `docker compose down` (without `-v`) instead if you want to stop the containers but keep the ingested vector store.

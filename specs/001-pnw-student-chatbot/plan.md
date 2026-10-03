@@ -8,7 +8,7 @@
 
 Build a standalone, publicly accessible web chatbot that answers PNW students' natural-language questions about university policies, deadlines, procedures, courses, and programs by retrieving from a curated corpus of approved PNW webpages and PDFs and generating grounded, cited answers. The system fails safely (declines and refers to the appropriate office) when it lacks reliable grounding or the question requires private/personalized data, disambiguates Hammond vs. Westville campus context when it affects the answer, and preserves structured relationships from source documents (deadline-to-term-to-condition, prerequisite-to-course) rather than flattening them.
 
-Technical approach (course-constrained, v1 student project): a FastAPI (Python) backend and a React (Vite) frontend, each running in its own container via Docker Compose (`docker compose up --build`) — `uv` manages the backend's Python environment and `npm` manages the frontend inside their respective images. Retrieval uses a local, file-based ChromaDB vector store (no separate database server to install or run), with its data directory persisted via a Docker volume so ingested content survives container restarts. Generation and embeddings use Google Gemini's free-tier API rather than a paid LLM API. Conversation context (e.g., a resolved campus from a prior clarification) is passed back to the server by the client on each request rather than persisted server-side, keeping the system stateless and simple.
+Technical approach (course-constrained, v1 student project): a FastAPI (Python) backend and a React (Vite) frontend, each running in its own container via Docker Compose (`docker compose up --build`) — `uv` manages the backend's Python environment and `npm` manages the frontend inside their respective images. Retrieval uses PostgreSQL + pgvector, run as a `db` Docker Compose service (no native install), with its data persisted via a Docker volume so ingested content survives container restarts. Generation and embeddings use Google Gemini's free-tier API rather than a paid LLM API. Conversation context (e.g., a resolved campus from a prior clarification) is passed back to the server by the client on each request rather than persisted server-side, keeping the system stateless and simple.
 
 This revision is a simplification pass over the prior design: the persisted model is now a single `SourceChunk` entity, the API returns exactly three response shapes with no unused fields, the audience disclaimer is a static frontend element, ingestion uses a curated approved-source manifest instead of a crawler, and unrequired infrastructure (a performance benchmark, a custom evaluation runner, a second deployment mode, rate-limit-specific machinery) has been removed. No functional requirement changed — see `research.md` for the reasoning behind each simplification.
 
@@ -17,10 +17,10 @@ This revision is a simplification pass over the prior design: the persisted mode
 **Language/Version**: Python 3.11+ (backend, managed with `uv`); JavaScript (ES2020+) for the frontend via React 18 + Vite (no TypeScript build step, to keep tooling minimal for a v1 student project)
 
 **Primary Dependencies**:
-- Backend: FastAPI, Uvicorn, `google-genai` (Gemini SDK, for both generation and embeddings), `chromadb`, `beautifulsoup4` + `pypdf` (ingestion parsing), Pydantic
+- Backend: FastAPI, Uvicorn, `google-genai` (Gemini SDK, for both generation and embeddings), `psycopg` + `pgvector`, `httpx` (ingestion fetching), `beautifulsoup4` + `pypdf` (ingestion parsing), Pydantic
 - Frontend: React 18, Vite, native `fetch` (no extra HTTP client library needed)
 
-**Storage**: ChromaDB running in local persistent mode — a single embedded, file-based vector store (path `/app/data/chroma` inside the backend container, set via `CHROMA_PATH` and persisted through a Docker volume), storing `SourceChunk` text, embeddings, and the small optional metadata set (`campus`, `academicTerm`, `courseName`, `programName`, `studentLevel`) defined in `data-model.md`. No separate database server/container. See `research.md` §4–§5.
+**Storage**: PostgreSQL 17 + pgvector (`db` Compose service, `pg_data` volume, `DATABASE_URL`), with a `documents` table (one row per approved source) and a `chunks` table storing `SourceChunk` text, its 768-dimension Gemini embedding (HNSW cosine index), and the small optional metadata set (`campus`, `academicTerm`, `courseName`, `programName`, `studentLevel`) defined in `data-model.md`. See `research.md` §4–§5.
 
 **Testing**: `pytest` with FastAPI's `TestClient` for backend unit/contract tests; React Testing Library + Vitest for frontend component tests. No end-to-end browser-automation suite and no performance-benchmark test for v1 — end-to-end behavior and the SC-001–SC-005 evaluation set are instead validated manually via `quickstart.md` (see `research.md` §9–§11).
 
@@ -45,8 +45,8 @@ This revision is a simplification pass over the prior design: the persisted mode
 | I. Grounded Answers Only (NON-NEGOTIABLE) | PASS | Generation is constrained to retrieved context only (research.md §2); an `answered` response requires non-empty `sources` (data-model.md) |
 | II. Fail Safe, Never Guess | PASS | `backend/app/grounding.py` declines and refers when insufficient/ambiguous/materially-contradictory/private-data/explicitly-outdated-with-no-current-evidence/out-of-scope (tasks.md Phase 4, T034) — a material conflict between approved sources always returns `cannot_answer`, never an `answered` response that picks one side (FR-017); when only an older source's currency is uncertain and newer evidence also supports the answer, that narrower uncertainty is stated in `explanation` instead, never guessed (research.md §5) |
 | III. No Private Data, No Login Wall | PASS | No auth anywhere in the design (FR-024); private-data questions are detected and referred, never answered (FR-020) |
-| IV. Simplicity Over Engineering Polish | PASS | Single ChromaDB store with one `SourceChunk` entity, no relational database, no crawler, no separate ingestion service, no performance/evaluation infrastructure beyond what's required (research.md §5, §6, §10, §11); two Docker Compose services (backend, frontend) mirror the existing two-project split rather than adding new services |
-| V. Containerized, Free-Tier Stack (NON-NEGOTIABLE) | PASS | Docker Compose runs a `backend` container (FastAPI/`uv`) and a `frontend` container (React/npm); Google Gemini free tier only; ChromaDB remains a single embedded store, now persisted via a Docker volume instead of a bare local directory (research.md §1, §4, §8) |
+| IV. Simplicity Over Engineering Polish | PASS | Single PostgreSQL/pgvector store with one domain entity (`SourceChunk`, grouped under a `documents` row per source), no crawler, no separate ingestion service, no performance/evaluation infrastructure beyond what's required (research.md §5, §6, §10, §11); three Docker Compose services (db, backend, frontend) — the database runs from its official image rather than a native install |
+| V. Containerized, Free-Tier Stack (NON-NEGOTIABLE) | PASS | Docker Compose runs a `backend` container (FastAPI/`uv`) and a `frontend` container (React/npm); Google Gemini free tier only; PostgreSQL + pgvector runs as the `db` service with a persistent Docker volume (constitution v3.0.0; research.md §1, §4, §8) |
 | Content & Context Integrity | PASS | Deadline/prerequisite structure preserved without cross-mixing (FR-013/FR-016) via `structureContext`/`courseName`, with chunk boundaries themselves kept term-safe (tasks.md T059); clarification covers all four missing-context dimensions — campus, program, academic term, and student level (FR-009) — via `backend/app/clarification.py`'s `extract_explicit_context`/`find_missing_context` pair (tasks.md T040, T042, T053–T054, T060–T061); retrieval filters on whichever of those dimensions is resolved, using one eligibility rule across all four — a chunk that omits the field, carries `"both"`, or matches the resolved value stays eligible; only a *different* specific value is excluded, so a context-independent source is never accidentally dropped just because some dimension got resolved (research.md §12; T041 campus, T055 program/student-level, T060 academic term) — separately, T051 boosts on a raw `courseName` mention, independent of resolved context |
 | Development Workflow | PASS | Contract/unit tests scheduled per story; `quickstart.md` re-validation required before a touching feature is done |
 
@@ -74,7 +74,7 @@ flowchart LR
         Gen["Gemini grounded generation"]
     end
 
-    Chroma[("ChromaDB<br/>local persistent store<br/>(Docker volume: chroma_data)")]
+    VectorDB[("PostgreSQL + pgvector<br/>db service<br/>(Docker volume: pg_data)")]
 
     subgraph Ingestion["Ingestion Pipeline (offline CLI)"]
         Manifest["Approved-source manifest"]
@@ -91,7 +91,7 @@ flowchart LR
     Priv -- "not private" --> Extract
     Extract -- "resolved campus/program/<br/>student_level/academic_term" --> Retrieval
     Retrieval -- "embed question" --> Gemini
-    Retrieval --> Chroma
+    Retrieval --> VectorDB
     Retrieval --> Missing
     Missing -- "context still missing" --> API
     Missing -- "context resolved" --> Ground
@@ -103,14 +103,14 @@ flowchart LR
 
     Manifest --> Parse --> Chunk --> Embed
     Embed -- "embed chunks" --> Gemini
-    Embed --> Chroma
+    Embed --> VectorDB
 ```
 
 This is the single, authoritative request-handling order (previously duplicated/at risk of drifting between the diagram and tasks.md — now consistent): validate → private-data check → extract explicit context (campus/program/student_level/academic_term, from `context` and/or the question text) → retrieve using whatever was resolved → check the retrieved chunks for still-missing context → clarification (if needed) → grounding/fail-safe check (a material conflict between approved sources on the fact needed to answer always returns `cannot_answer`, never a picked-side `answered`) → generation → response. `tasks.md` T020 states this order in prose for `backend/app/api/query.py`; every task that adds a piece of the pipeline implements into that order rather than redefining it. Both `Extract` and `Missing` above are the same `clarification.py` module (one file, two functions — `extract_explicit_context` and `find_missing_context`), shown as two boxes because they run at two different points in the pipeline, not because there are two modules.
 
 ## Vector Database Preparation Workflow
 
-This is the offline pipeline that populates the local ChromaDB store the API queries at request time (the `Ingestion` subgraph in the Architecture diagram above, expanded here as its own workflow since it's a distinct, run-before-the-app-works process rather than a request-time concern). It is triggered manually via a CLI entry point — never by the running API — and is idempotent: re-running it against an unchanged manifest reproduces the same stored chunks rather than duplicating them.
+This is the offline pipeline that populates the PostgreSQL/pgvector store the API queries at request time (the `Ingestion` subgraph in the Architecture diagram above, expanded here as its own workflow since it's a distinct, run-before-the-app-works process rather than a request-time concern). It is triggered manually via a CLI entry point — never by the running API — and is idempotent: re-running it against an unchanged manifest reproduces the same stored chunks rather than duplicating them.
 
 ```mermaid
 flowchart TD
@@ -120,10 +120,10 @@ flowchart TD
     C -- PDF --> D2["3b. PDF parser<br/>pdf_parser.py<br/>preserves page/section structure"]
     D1 --> E["4. Structure-aware chunker<br/>chunker.py<br/>keeps each term/action/condition<br/>tuple inside one chunk (FR-013)"]
     D2 --> E
-    E --> F["5. Delete existing chunks for this url<br/>retrieval.delete_chunks_for_url()<br/>(idempotent re-ingestion)"]
-    F --> G["6. Embed each chunk<br/>retrieval.embed_text()<br/>Gemini embedding API"]
-    G --> H["7. Write chunks + embeddings + metadata<br/>retrieval.add_chunks()<br/>id = url + chunk index"]
-    H --> I[("ChromaDB<br/>local persistent store<br/>Docker volume: chroma_data<br/>(/app/data/chroma in container)")]
+    E --> F["5. Skip if unchanged<br/>(content hash matches stored document)"]
+    F --> G["6. Embed each chunk<br/>retrieval.embed_documents()<br/>Gemini embedding API, 768 dims"]
+    G --> H["7. Upsert document + replace its chunks<br/>in one transaction<br/>ingestion/repository.py"]
+    H --> I[("PostgreSQL + pgvector<br/>documents + chunks tables<br/>Docker volume: pg_data")]
 ```
 
 **Steps**:
@@ -132,13 +132,13 @@ flowchart TD
 2. **Fetch/read the source** at `url` when the CLI runs.
 3. **Parse** with the format-appropriate parser — `html_parser.py` (BeautifulSoup) or `pdf_parser.py` (`pypdf`) — extracting text while preserving the structural relationships FR-013/FR-014/FR-015/FR-016 depend on (heading hierarchy, step order, list membership, table row/column/header association, expandable-section content).
 4. **Chunk** the parsed content (`chunker.py`), attaching the manifest entry's `url`/`title`/optional metadata to every resulting chunk, and splitting deadline tables at a boundary that never separates a date from its term/action/condition.
-5. **Clear prior chunks for that `url`** before writing new ones, so re-ingesting a source replaces rather than duplicates its chunks.
-6. **Embed** each chunk's text via the Gemini embedding API (`retrieval.embed_text()`).
-7. **Write** each chunk — text, embedding, and whichever optional metadata fields it carries — into the Chroma collection, with an ID derived from `url` + chunk index (never the bare `url`, since one source produces many chunks).
+5. **Skip unchanged sources**: if the chunked content, metadata and embedding model hash to the same value already stored for that source, nothing is re-embedded or rewritten.
+6. **Embed** each chunk's text via the Gemini embedding API (`retrieval.embed_documents()`, batched, 768 dimensions).
+7. **Write**: upsert the source's `documents` row and, in the same transaction, delete its old `chunks` rows and insert the new ones — text, embedding, chunk index, page number, and whichever optional metadata fields it carries — so re-ingesting replaces rather than duplicates, and a failure leaves the previous version intact.
 
-**Invocation**: `docker compose exec backend uv run python -m app.ingestion.run --manifest app/ingestion/sources.json`, run against the already-running `backend` container (see `quickstart.md`'s "Ingest the approved-source corpus" section for the runnable version, including expected output and how to rebuild the store from scratch). This must be run at least once before the API can answer anything, and re-run whenever the manifest changes.
+**Invocation**: `docker compose exec backend uv run --no-sync python -m app.ingestion.run --manifest app/ingestion/sources.json`, run against the already-running `backend` container (see `quickstart.md`'s "Ingest the approved-source corpus" section for the runnable version, including expected output and how to rebuild the store from scratch). This must be run at least once before the API can answer anything, and re-run whenever the manifest changes.
 
-**Implementation tasks**: `tasks.md` T013–T015 (config, Gemini embed helper, Chroma wrapper — `get_or_create_collection`, `add_chunks`, `delete_chunks_for_url`), T023–T027 (HTML/PDF parsers, manifest loader, chunker, CLI entrypoint), T049–T050 (course/program metadata on chunks), T059 (deadline-table chunk boundaries).
+**Implementation tasks**: `tasks.md` T013–T015 (config, Gemini embed helper, pgvector store — `db.py`, `retrieval.py`, `ingestion/repository.py`), T023–T027 (HTML/PDF parsers, manifest loader, chunker, CLI entrypoint), T049–T050 (course/program metadata on chunks), T059 (deadline-table chunk boundaries).
 
 ## Complete Workflow (Ingestion + Query, Combined)
 
@@ -155,7 +155,7 @@ flowchart TD
         I4b --> I5
         I5 --> I6["6. Delete existing chunks<br/>for this url (idempotent)"]
         I6 --> I7["7. Embed each chunk"]
-        I7 --> I8["8. Write chunks + embeddings<br/>+ metadata to Chroma"]
+        I7 --> I8["8. Write chunks + embeddings<br/>+ metadata to pgvector"]
     end
 
     subgraph Query["RUNTIME: Per-Request Query Pipeline (POST /api/query)"]
@@ -172,13 +172,13 @@ flowchart TD
         Q9 --> R4(["10. answered<br/>(directAnswer, explanation, sources)"])
     end
 
-    Chroma[("ChromaDB<br/>local persistent store<br/>(Docker volume: chroma_data)")]
+    VectorDB[("PostgreSQL + pgvector<br/>db service<br/>(Docker volume: pg_data)")]
     Gemini["Google Gemini API (free tier)<br/>embeddings + generation"]
 
     I7 -. "embed chunk text" .-> Gemini
-    I8 --> Chroma
+    I8 --> VectorDB
     Q4 -. "embed question text" .-> Gemini
-    Q4 -- "similarity + filters" --> Chroma
+    Q4 -- "similarity + filters" --> VectorDB
     Q8 -. "generate from retrieved chunks" .-> Gemini
 
     UI["React (Vite) Chat UI"] -- "question + context" --> Q1
@@ -205,36 +205,41 @@ specs/001-pnw-student-chatbot/
 ### Source Code (repository root)
 
 ```text
-docker-compose.yml            # Orchestrates the backend + frontend containers (docker compose up --build)
+docker-compose.yml            # Orchestrates the db (PostgreSQL + pgvector) + backend + frontend containers (docker compose up --build)
 
 backend/                      # FastAPI application (containerized; uv + uvicorn inside the image)
 ├── Dockerfile                 # Python 3.12-slim, installs uv, uv sync, runs uvicorn on 0.0.0.0:8000
 ├── .dockerignore
 ├── app/
 │   ├── main.py                # FastAPI app entrypoint; CORS for the frontend dev origin
-│   ├── config.py               # Env/config loader (GEMINI_API_KEY, CHROMA_PATH); shared Gemini client setup
+│   ├── config.py               # Env/config loader (GEMINI_API_KEY, DATABASE_URL); shared Gemini client setup
 │   ├── api/
 │   │   └── query.py              # POST /api/query route — the one place that owns the orchestration order (see contracts/)
 │   ├── models.py                  # Pydantic request/response models: QueryRequest, QueryResponse (answered / clarification_needed / cannot_answer)
-│   ├── retrieval.py                # Chroma store wrapper + similarity search + campus/program/student-level/academic-term metadata filtering (resolved-context-driven) + a separate raw-text courseName boost
+│   ├── retrieval.py                # Gemini embeddings + pgvector similarity search + campus/program/student-level/academic-term metadata filtering (resolved-context-driven) + a separate raw-text courseName boost
 │   ├── generation.py                # Grounded-generation prompt construction and the Gemini generation call
 │   ├── grounding.py                  # Private-data detection, insufficient-grounding, conflicting-source, and out-of-scope checks, plus referral-office lookup
 │   ├── clarification.py               # Campus, program, student-level, and academic-term disambiguation (FR-009, FR-010) — one module, not one per check
+│   ├── db.py                            # PostgreSQL connection (pgvector adapter) + documents/chunks schema
 │   └── ingestion/                      # CLI-invoked pipeline: approved-source manifest, HTML/PDF parsers, structure-aware chunker, Gemini embedder
 │       ├── sources.json                  # The curated approved-source list/manifest (research.md §6)
+│       ├── models.py                     # SourceEntry (manifest entry), Block, ParsedDocument, Chunk
+│       ├── fetch.py                      # Download + webpage/PDF detection
+│       ├── cleaning.py                   # Whitespace/Unicode normalization, repeated header/footer removal
 │       ├── parsers/
 │       │   ├── html_parser.py
 │       │   └── pdf_parser.py
 │       ├── chunker.py
-│       └── run.py                        # CLI entrypoint: uv run python -m app.ingestion.run
+│       ├── repository.py                 # Idempotent document upsert + transactional chunk replace
+│       ├── pipeline.py                   # fetch → parse → chunk → embed → store, per source
+│       ├── run.py                        # CLI entrypoint: uv run python -m app.ingestion.run
+│       └── verify.py                     # CLI: inspect stored documents/chunks, run a similarity search
 ├── tests/
 │   ├── contract/                   # FastAPI TestClient contract tests for /api/query
 │   ├── integration/                 # End-to-end query-flow tests (in-process, no browser)
 │   └── unit/                         # Unit tests for retrieval, grounding, clarification, chunking
-├── data/
-│   └── chroma/                       # Local persistent vector store directory (gitignored; mounted from the chroma_data Docker volume at /app/data/chroma in the container)
 ├── pyproject.toml                    # uv-managed dependencies
-└── .env.example                       # GEMINI_API_KEY, CHROMA_PATH — copy to .env (gitignored) for docker-compose's env_file
+└── .env.example                       # GEMINI_API_KEY, DATABASE_URL — copy to .env (gitignored) for docker-compose's env_file
 
 frontend/                     # React app (containerized; npm inside the image)
 ├── Dockerfile                  # Node 22, npm install, runs the Vite dev server on 0.0.0.0:5173
@@ -254,7 +259,7 @@ frontend/                     # React app (containerized; npm inside the image)
 └── vite.config.js
 ```
 
-**Structure Decision**: Two simple, independently buildable containers — `backend/` (FastAPI + ChromaDB + Gemini) and `frontend/` (React/Vite), orchestrated by the root `docker-compose.yml` — per the course's explicit requirement to use FastAPI and React (not Next.js) and to run via Docker Compose. The backend is intentionally kept to a small, flat module set (`retrieval.py`, `generation.py`, `grounding.py`, `clarification.py` — one file per concern, not one file per sub-check) rather than the deeper package hierarchy of the prior revision; the ingestion pipeline lives inside `backend/app/ingestion/` as a CLI-invoked module driven by a curated manifest rather than a crawler, and there is a single local vector store (ChromaDB) rather than a separate relational database. See `research.md` for the rationale behind each simplification.
+**Structure Decision**: Two simple, independently buildable application containers plus the official `pgvector/pgvector` database container — `backend/` (FastAPI + PostgreSQL/pgvector + Gemini) and `frontend/` (React/Vite), orchestrated by the root `docker-compose.yml` — per the course's explicit requirement to use FastAPI and React (not Next.js) and to run via Docker Compose. The backend is intentionally kept to a small, flat module set (`retrieval.py`, `generation.py`, `grounding.py`, `clarification.py` — one file per concern, not one file per sub-check) rather than the deeper package hierarchy of the prior revision; the ingestion pipeline lives inside `backend/app/ingestion/` as a CLI-invoked module driven by a curated manifest rather than a crawler, and there is a single local vector store (ChromaDB) rather than a separate relational database. See `research.md` for the rationale behind each simplification.
 
 ## Complexity Tracking
 

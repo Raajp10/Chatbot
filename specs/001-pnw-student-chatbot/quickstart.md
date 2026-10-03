@@ -2,13 +2,13 @@
 
 **Feature**: 001-pnw-student-chatbot | **Date**: 2026-09-19 (re-simplified)
 
-This guide validates the feature end-to-end once implemented, using the course-required stack: FastAPI + React, run via Docker Compose, Google Gemini free-tier APIs, and a local ChromaDB store. It references `data-model.md` and `contracts/query-api.md` rather than duplicating them.
+This guide validates the feature end-to-end once implemented, using the course-required stack: FastAPI + React, run via Docker Compose, Google Gemini free-tier APIs, and PostgreSQL + pgvector (as a Docker Compose service). It references `data-model.md` and `contracts/query-api.md` rather than duplicating them.
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and the Docker Compose plugin (`docker compose version`) installed and running — this is the only way this project is run
 - A Google Gemini API key (free tier — see course material for how to obtain one)
-- No separate database server is required — ChromaDB persists to a Docker-managed volume automatically
+- No native database install is required — PostgreSQL + pgvector runs as the `db` Docker Compose service and persists to the `pg_data` volume
 - Python 3.11+/[`uv`](https://docs.astral.sh/uv/) and Node.js 20+/`npm` are only needed on the host if you want IDE tooling (linting, autocomplete) outside the containers — they are not required to build or run the app
 - A small, hand-curated approved-source manifest (`backend/app/ingestion/sources.json`) listing a handful of approved PNW pages/PDFs, each entry supplying `url` and `title` at minimum, covering: an add/drop deadline table, a course-with-prerequisites catalog entry, a parking-ticket policy page, one page that applies to only a single campus, a program-requirements page for at least two distinct programs, a plan-of-study page that differs for undergraduate vs. graduate students, and one page carrying an explicit prior-year date alongside a newer page covering the same topic. Any important child page or attached PDF must be its own explicit entry in the manifest (there is no crawler to discover it automatically — see `research.md` §6). Automated tests may use separate local fixtures that stand in for sources; the approved manifest itself always points at official/approved PNW content, never fabricated or placeholder pages.
 
@@ -19,16 +19,17 @@ cp backend/.env.example backend/.env   # set GEMINI_API_KEY
 docker compose build                   # builds the backend and frontend images
 ```
 
-No migration step is needed — ChromaDB creates its persistent store automatically the first time it's used, inside the `chroma_data` Docker volume mounted at `/app/data/chroma` in the `backend` container.
+No migration step is needed — the ingestion CLI enables the `vector` extension and creates the `documents`/`chunks` tables automatically on first run, inside the `pg_data` Docker volume.
 
 ## Ingest the approved-source corpus
 
 ```bash
-docker compose up -d backend
-docker compose exec backend uv run python -m app.ingestion.run --manifest app/ingestion/sources.json
+docker compose up -d db backend
+docker compose exec backend uv run --no-sync python -m app.ingestion.run --manifest app/ingestion/sources.json
+docker compose exec backend uv run --no-sync python -m app.ingestion.verify   # documents, chunks, embeddings summary
 ```
 
-Expected outcome: for each manifest entry, its content is fetched/read, parsed, chunked, embedded, and written to the local Chroma store as one or more `SourceChunk` records, carrying `structureContext` and any `campus`/`academicTerm`/`courseName`/`programName`/`studentLevel` values the manifest supplied — fields the manifest didn't supply are simply omitted, never guessed. Re-running the same command is idempotent (re-ingesting a URL replaces its prior chunks rather than duplicating them).
+Expected outcome: for each manifest entry, its content is fetched/read, parsed, chunked, embedded, and written to PostgreSQL/pgvector as one or more `SourceChunk` rows, carrying `structureContext` and any `campus`/`academicTerm`/`courseName`/`programName`/`studentLevel` values the manifest supplied — fields the manifest didn't supply are simply omitted, never guessed. Re-running the same command is idempotent (unchanged sources are skipped; a changed source's prior chunks are replaced, never duplicated). See the README's "Offline RAG Ingestion" section for details.
 
 ## Run the app
 
@@ -123,7 +124,7 @@ No scripted evaluation runner exists for v1 (`research.md` §11) — run these q
 ## Cleanup
 
 ```bash
-docker compose down -v   # stops containers and deletes the chroma_data volume; re-run ingestion to rebuild it
+docker compose down -v   # stops containers and deletes the pg_data volume; re-run ingestion to rebuild it
 ```
 
 Use `docker compose down` (without `-v`) instead if you want to stop the containers but keep the ingested vector store.

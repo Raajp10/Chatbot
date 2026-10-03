@@ -1,4 +1,21 @@
 services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pnw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pnw}
+      POSTGRES_DB: ${POSTGRES_DB:-pnw_chatbot}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      # Published on 5433 so it doesn't clash with a Postgres already running on the host.
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: ./backend
@@ -6,9 +23,10 @@ services:
     env_file:
       - backend/.env
     environment:
-      - CHROMA_PATH=/app/data/chroma
-    volumes:
-      - chroma_data:/app/data/chroma
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-pnw}:${POSTGRES_PASSWORD:-pnw}@db:5432/${POSTGRES_DB:-pnw_chatbot}
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "8000:8000"
 
@@ -22,4 +40,4 @@ services:
       - "5173:5173"
 
 volumes:
-  chroma_data:
+  pg_data:

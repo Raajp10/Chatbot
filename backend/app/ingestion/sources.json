@@ -1,1 +1,23 @@
-[]
+[
+  {
+    "id": "student-absence-policy",
+    "url": "https://www.pnw.edu/dean-of-students/policies/student-absence-policy/",
+    "title": "Student Absence Policy",
+    "sourceName": "PNW Office of the Dean of Students",
+    "category": "attendance"
+  },
+  {
+    "id": "grade-appeal-policy",
+    "url": "https://www.pnw.edu/dean-of-students/policies/grade-appeal-policy/",
+    "title": "Grade Appeal Policy",
+    "sourceName": "PNW Office of the Dean of Students",
+    "category": "grades"
+  },
+  {
+    "id": "classroom-behavior-policy",
+    "url": "https://www.pnw.edu/faculty-senate/wp-content/uploads/sites/71/2021/01/Classroom-Behavior-Policy.pdf",
+    "title": "Classroom Behavior Policy",
+    "sourceName": "PNW Faculty Senate",
+    "category": "student conduct"
+  }
+]

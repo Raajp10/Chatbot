@@ -69,7 +69,7 @@ Standard FastAPI/Pydantic validation response, returned automatically when `text
 
 ### Response — `503 Service Unavailable`
 
-Returned when the backend cannot complete the request because the Gemini API is unavailable, its free-tier quota/rate limit has been hit, or the local Chroma store cannot be reached. Body: `{ "error": "string" }`. The frontend shows a generic "please try again shortly" message; the client does not need a machine-readable retry time for this v1 (see `research.md` §10).
+Returned when the backend cannot complete the request because the Gemini API is unavailable, its free-tier quota/rate limit has been hit, or the PostgreSQL/pgvector database cannot be reached. Body: `{ "error": "string" }`. The frontend shows a generic "please try again shortly" message; the client does not need a machine-readable retry time for this v1 (see `research.md` §10).
 
 ## Contract test coverage (for `/speckit-tasks` to schedule)
 

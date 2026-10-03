@@ -1,102 +1,129 @@
-"""Chroma store wrapper + similarity search + campus/program/student-level/academic-term metadata filtering + courseName boost. Implemented in T014/T015/T028/T041/T051/T055/T060."""
+"""Gemini embeddings + pgvector similarity search over stored chunks. Implemented in T014/T015.
 
+Query-time filtering by campus/program/student-level/academic-term (T028/T041/T055/T060) is
+applied in Python after the similarity search (research.md §12) and is not implemented yet.
+"""
+
+import math
+import time
 from typing import Any
 
-import chromadb
+import psycopg
+from google.genai import errors, types
+from pgvector import Vector
+from psycopg.types.json import Jsonb
 
-from app.config import CHROMA_PATH, EMBEDDING_MODEL, ServiceUnavailableError, get_client
-
-_COLLECTION_NAME = "source_chunks"
-
-# SourceChunk metadata fields (data-model.md); `url` and `title` are required on every
-# chunk, the rest are omitted (never guessed) when the manifest entry doesn't supply them.
-_METADATA_FIELDS = (
-    "url",
-    "title",
-    "structureContext",
-    "campus",
-    "academicTerm",
-    "courseName",
-    "programName",
-    "studentLevel",
+from app.config import (
+    EMBEDDING_DIMENSIONS,
+    EMBEDDING_MODEL,
+    ServiceUnavailableError,
+    get_client,
 )
+from app.db import connect
 
-_persistent_client: chromadb.ClientAPI | None = None
-
-
-def _get_persistent_client() -> chromadb.ClientAPI:
-    global _persistent_client
-    if _persistent_client is None:
-        _persistent_client = chromadb.PersistentClient(path=CHROMA_PATH)
-    return _persistent_client
-
-
-def get_or_create_collection() -> chromadb.Collection:
-    return _get_persistent_client().get_or_create_collection(name=_COLLECTION_NAME)
+# Gemini's embed_content accepts up to 100 texts per request.
+_EMBED_BATCH_SIZE = 100
+_RATE_LIMIT_RETRIES = 4
 
 
 def embed_text(text: str) -> list[float]:
-    """Embed `text` via Gemini's embedding API, raising ServiceUnavailableError on any SDK-level failure."""
-    try:
-        response = get_client().models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=text,
+    """Embed a student's question for similarity search."""
+    return _embed([text], task_type="RETRIEVAL_QUERY")[0]
+
+
+def embed_documents(texts: list[str], title: str | None = None) -> list[list[float]]:
+    """Embed chunk texts for storage, batching requests. `title` is the source document's title."""
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = texts[start : start + _EMBED_BATCH_SIZE]
+        vectors.extend(_embed(batch, task_type="RETRIEVAL_DOCUMENT", title=title))
+    return vectors
+
+
+def _embed(texts: list[str], task_type: str, title: str | None = None) -> list[list[float]]:
+    """Call Gemini, retrying on rate limits; raise ServiceUnavailableError on any SDK failure."""
+    config = types.EmbedContentConfig(
+        task_type=task_type,
+        output_dimensionality=EMBEDDING_DIMENSIONS,
+        title=title if task_type == "RETRIEVAL_DOCUMENT" else None,
+    )
+    client = get_client()
+    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        try:
+            response = client.models.embed_content(
+                model=EMBEDDING_MODEL, contents=texts, config=config
+            )
+            break
+        except errors.APIError as exc:
+            if exc.code == 429 and attempt < _RATE_LIMIT_RETRIES:
+                time.sleep(2 ** (attempt + 2))  # free-tier per-minute quota: 4s, 8s, 16s, 32s
+                continue
+            raise ServiceUnavailableError(f"Gemini embedding request failed: {exc}") from exc
+        except Exception as exc:
+            raise ServiceUnavailableError(f"Gemini embedding request failed: {exc}") from exc
+
+    vectors = [list(e.values or []) for e in response.embeddings or []]
+    if len(vectors) != len(texts) or any(len(v) != EMBEDDING_DIMENSIONS for v in vectors):
+        raise ServiceUnavailableError(
+            f"Gemini returned {len(vectors)} embeddings for {len(texts)} texts "
+            f"(expected {EMBEDDING_DIMENSIONS} dimensions each)"
         )
-    except Exception as exc:
-        raise ServiceUnavailableError(str(exc)) from exc
-    return response.embeddings[0].values
+    # Truncated (non-3072) Gemini embeddings aren't unit-length; normalize them.
+    return [_normalize(v) for v in vectors]
 
 
-def _chunk_metadata(chunk: dict[str, Any]) -> dict[str, Any]:
-    return {
-        field: chunk[field]
-        for field in _METADATA_FIELDS
-        if chunk.get(field) is not None
-    }
-
-
-def add_chunks(chunks: list[dict[str, Any]]) -> None:
-    """Write already-embedded chunks (each a dict with `url`, `title`, `content`, `embedding`,
-    and any optional metadata fields). Each chunk gets its own Chroma ID derived from its
-    `url` + its index among the chunks sharing that `url` (e.g. `f"{url}#{i}"`)."""
-    if not chunks:
-        return
-    collection = get_or_create_collection()
-    per_url_index: dict[str, int] = {}
-    ids, embeddings, documents, metadatas = [], [], [], []
-    for chunk in chunks:
-        url = chunk["url"]
-        index = per_url_index.get(url, 0)
-        per_url_index[url] = index + 1
-        ids.append(f"{url}#{index}")
-        embeddings.append(chunk["embedding"])
-        documents.append(chunk["content"])
-        metadatas.append(_chunk_metadata(chunk))
-    collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
-
-
-def delete_chunks_for_url(url: str) -> None:
-    """Remove any chunks already stored for `url`, so re-ingestion replaces rather than duplicates."""
-    collection = get_or_create_collection()
-    collection.delete(where={"url": url})
+def _normalize(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vector))
+    return [x / norm for x in vector] if norm else vector
 
 
 def query(
     embedding: list[float],
     where: dict[str, Any] | None = None,
     k: int = 5,
+    conn: psycopg.Connection | None = None,
 ) -> list[dict[str, Any]]:
-    """Similarity-search the collection, returning up to `k` chunks as dicts (metadata + `content`)."""
-    collection = get_or_create_collection()
-    query_kwargs: dict[str, Any] = {"query_embeddings": [embedding], "n_results": k}
-    if where:
-        query_kwargs["where"] = where
-    results = collection.query(**query_kwargs)
-    documents = results.get("documents") or [[]]
-    metadatas = results.get("metadatas") or [[]]
-    chunks: list[dict[str, Any]] = []
-    for document, metadata in zip(documents[0], metadatas[0]):
-        chunk = dict(metadata)
-        chunk["content"] = document
-        chunks.append(chunk)
-    return chunks
+    """Return the `k` chunks nearest to `embedding` (cosine distance), most similar first.
+
+    Each result is a SourceChunk-shaped dict (data-model.md): `url`, `title`, `content`,
+    `structureContext`, any optional context fields the manifest supplied, plus `pageNumber`,
+    `chunkIndex` and `similarity` (1 − cosine distance). `where` optionally restricts results to
+    chunks whose metadata contains all the given key/value pairs.
+    """
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT d.source_url, d.title, c.content, c.structure_context, c.page_number,
+                   c.chunk_index, c.metadata, 1 - (c.embedding <=> %(q)s) AS similarity
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.metadata @> %(where)s
+            ORDER BY c.embedding <=> %(q)s
+            LIMIT %(k)s
+            """,
+            {"q": Vector(embedding), "where": Jsonb(where or {}), "k": k},
+        ).fetchall()
+    except psycopg.Error as exc:
+        raise ServiceUnavailableError(f"Vector search failed: {exc}") from exc
+    finally:
+        if owns_conn:
+            conn.close()
+
+    results = []
+    for url, title, content, structure_context, page, index, metadata, similarity in rows:
+        chunk = {key: value for key, value in (metadata or {}).items() if value is not None}
+        chunk.update(url=url, title=title, content=content, chunkIndex=index,
+                     similarity=float(similarity))
+        if structure_context:
+            chunk["structureContext"] = structure_context
+        if page is not None:
+            chunk["pageNumber"] = page
+        results.append(chunk)
+    return results
+
+
+def search(question: str, k: int = 5, conn: psycopg.Connection | None = None) -> list[dict]:
+    """Embed `question` and return its `k` most similar chunks."""
+    return query(embed_text(question), k=k, conn=conn)

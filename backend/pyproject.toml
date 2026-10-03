@@ -1,22 +1,24 @@
 [project]
 name = "pnw-chatbot-backend"
 version = "0.1.0"
-description = "PNW Student Knowledge Chatbot backend (FastAPI + ChromaDB + Google Gemini)"
+description = "PNW Student Knowledge Chatbot backend (FastAPI + PostgreSQL/pgvector + Google Gemini)"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
-    "chromadb",
+    "psycopg[binary]",
+    "pgvector",
+    "httpx",
     "google-genai",
     "beautifulsoup4",
     "pypdf",
     "pydantic",
+    "python-dotenv",
 ]
 
 [dependency-groups]
 dev = [
     "pytest",
-    "httpx",
     "ruff",
 ]
 

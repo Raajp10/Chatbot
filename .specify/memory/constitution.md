@@ -1,5 +1,21 @@
 <!--
 Sync Impact Report
+- Version change: 2.0.0 → 3.0.0
+- Rationale (3.0.0, MAJOR): The course's offline-RAG assignment recommends
+  PostgreSQL + pgvector as the vector database, and the project owner chose to
+  adopt it. Principle V's NON-NEGOTIABLE "ChromaDB MUST remain a single
+  embedded, file-based store" requirement is replaced by "PostgreSQL + pgvector,
+  run as the `db` Docker Compose service with a persistent volume". Redefining
+  a NON-NEGOTIABLE requirement is MAJOR per the Governance rule. Free-tier-only
+  is unchanged.
+- Modified principles: V. Containerized, Free-Tier Stack (vector store
+  requirement)
+- Added sections: none
+- Removed sections: none
+- Deferred placeholders: none
+-->
+<!--
+Previous Sync Impact Report
 - Version change: 1.0.1 → 2.0.0
 - Rationale (2.0.0, MAJOR): The course now explicitly requires Docker for
   this project, reversing the prior explicit "no Docker" constraint in
@@ -127,17 +143,19 @@ service (FastAPI, dependencies managed with `uv` inside the image) and a
 `frontend` service (React/Vite, dependencies managed with `npm` inside the
 image), brought up together with `docker compose up --build`. The system MUST
 use only free-tier APIs — Google Gemini for generation and embeddings — and
-MUST NOT depend on a paid LLM or embedding service. ChromaDB MUST remain a
-single embedded, file-based store (no separate Chroma server process/container),
-with its data directory persisted via a Docker volume so ingested content
-survives container restarts.
+MUST NOT depend on a paid LLM or embedding service. The vector store MUST be a
+single PostgreSQL + pgvector database, run as the `db` Docker Compose service
+(official `pgvector/pgvector` image, so nothing is installed natively), with its
+data persisted via a Docker volume so ingested content survives container
+restarts.
 
 **Rationale**: These are explicit, non-negotiable course requirements for this
 project. Docker Compose is now required (reversing the prior no-Docker
-constraint) so the two-service local architecture is reproducible across
-machines without a shared native Python/Node setup; free-tier-only and a single
-embedded vector store remain required for the same cost and simplicity reasons
-as before.
+constraint) so the local architecture is reproducible across machines without a
+shared native Python/Node/PostgreSQL setup; free-tier-only remains required for
+cost reasons. PostgreSQL + pgvector is the course-recommended vector database
+for the offline RAG pipeline and, run from its official Docker image, adds no
+native install step.
 
 ## Content & Context Integrity
 
@@ -175,4 +193,4 @@ section, before implementation proceeds. Reviews (including `/code-review`)
 should check compliance with Principles I–III in particular, since they encode
 this project's user-facing trust and safety guarantees.
 
-**Version**: 2.0.0 | **Ratified**: 2026-09-16 | **Last Amended**: 2026-09-21
+**Version**: 3.0.0 | **Ratified**: 2026-09-16 | **Last Amended**: 2026-10-02
